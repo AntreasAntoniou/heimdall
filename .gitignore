@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.env
+.env.*
+# Heimdall run artifacts (evidence, results) default output dir
+heimdall-runs/
+# Captured auth sessions — NEVER commit (contain live cookies/tokens)
+*.storageState.json
+storageState*.json
+auth/
+coverage/
+.chronicle/
+CHRONICLE.md
