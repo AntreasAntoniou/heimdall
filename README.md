@@ -1,32 +1,45 @@
 # Heimdall
 
-**A multi-driver browser test runner for agentic development — author one JSON test plan, run it through real Chrome, headless Playwright/CDP, or an isolated Docker + Xvfb sandbox, in parallel, with unified evidence.**
+A browser and API test runner that turns an agent's claim of “it works” into repeatable checks and inspectable evidence.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-```bash
-npm install -g git+https://github.com/AntreasAntoniou/heimdall.git
-heimdall init        # write a sample plan
-heimdall run heimdall.plan.json
-```
-
----
+You describe the actions and the result that must be true in a JSON plan. Heimdall executes the self-driven cases, evaluates their assertions, and records outcomes with screenshots, network evidence, and per-assertion results. Cases requiring your real logged-in browser remain explicit handoffs; Heimdall does not pretend it drove them.
 
 ## Why Heimdall exists
 
-When an agent (Claude Code, or any coding agent) drives a browser to test a web app, it hits a hard wall: **focus**. A browser extension driving the *real* logged-in Chrome can only have one foreground tab with OS input focus at a time. Click here, type there — every action contends for the same physical focus. You cannot run twenty UI cases at once, because they all fight over the same window. Fidelity is perfect (it's your actual session), but parallelism is impossible and the run is slow and brittle.
+Clicking through an app is useful exploration, but it is hard to repeat, compare, or audit unless the expected outcomes are written down. And checks that depend on a person's current browser session should not be confused with checks run in a fresh automated browser.
 
-The fix is to stop pretending there's only one way to drive a browser. Heimdall splits browser testing into **three drivers**, each a different point on the **fidelity-vs-parallelism** tradeoff:
+Heimdall gives those checks a common contract. A case needs at least one **oracle**—an explicit pass/fail assertion—so a sequence of clicks alone cannot count as a test. The driver records where it ran; the report separates `pass`, `fail`, `error`, `blocked`, and `skipped`.
 
-| Driver | How it drives the browser | Fidelity tier | Parallel? | Needs |
-| --- | --- | --- | --- | --- |
-| `extension` | The agent's own browser tools drive your **real, logged-in Chrome** (highest fidelity). Heimdall **cannot** drive this itself, so it marks these cases `blocked` to keep reports honest. | `high` | No (single OS focus) | An agent with browser tools |
-| `cdp` *(default)* | Playwright over the Chrome DevTools Protocol. Input is dispatched **per-target**, so many `BrowserContext`s run genuinely in parallel with no shared OS focus. | `medium` | **Yes** | Playwright Chromium |
-| `container` | The `cdp` path **inside a disposable Docker + Xvfb sandbox** (Linux Chrome). Each case gets its own throwaway container → its own virtual display → its own OS focus, so you can run isolated *headed* sessions in parallel. The safe home for destructive or untrusted systems. | `medium-linux` | **Yes** | Docker |
+For example, after changing a search flow you can check that submitting a query reaches the results page, displays the expected text, and produces no console errors. An API case can check status and response fields, or start an asynchronous job, capture its ID, and poll until it is ready. Save the plan and run it again after the next change.
 
-The same plan runs across all three. `cdp` is the default and the verified-working lane: parallel, fast, headless-or-headed, with HAR, screenshots, and console capture per case. `extension` is the fidelity ceiling (your real session, your real cookies) but cannot be self-driven — Heimdall blocks those cases and tells you to run them via an agent's browser tools. `container` trades a little fidelity (Linux Chrome via Docker's VM) for isolation strong enough to point at risky systems.
+## Skill and runtime
 
-Heimdall is **honest about what it did not run.** A case it can't execute faithfully is `blocked`, never silently passed.
+This repository ships both:
+
+- [An Agent Skill](SKILL.md) that teaches an agent to author meaningful plans, choose drivers, respect risk boundaries, and report partial runs accurately.
+- A TypeScript runtime available as a CLI, an MCP server, and a library. It validates and executes plans and produces the evidence and reports.
+
+Installing the skill alone does not install the CLI or a browser. Conversely, you can use the CLI without an agent. The model helps decide what to test; the runner performs the specified actions and checks.
+
+## Choose where a case runs
+
+| Driver | What actually runs | Use and limit |
+| --- | --- | --- |
+| `cdp` (default) | Playwright launches Chromium; each case gets a fresh browser context. Cases run in parallel without sharing foreground input focus. | Repeatable browser/API checks, headless or headed. Injected auth is available, but this is not your existing Chrome session. Report tier: `medium`. |
+| `container` | The same execution path in a disposable Docker container per case, using a Linux Playwright image. | Separates the browser process from your desktop. Requires Docker and a built image; it does not isolate the remote application or undo server-side changes. Report tier: `medium-linux`. |
+| `extension` | No self-driven execution. The runner records `blocked`; an external human or browser-capable agent must perform the case. | Checks that need the real logged-in browser. Export the handoff and merge independently collected results. Report tier: `high`, a driver label—not proof that the check ran. |
+
+The plan format is shared, but the environments are not interchangeable. Choose for the claim you need to support and report any missing evidence.
+
+## What a pass means—and does not mean
+
+A pass means the authored assertions succeeded, not that the application is comprehensively correct. Weak assertions still make weak tests. Blocked/skipped cases can coexist with a successful process exit if at least one case passed and none failed or errored; inspect the summary before calling a whole plan complete.
+
+Heimdall can run axe-core checks and compare screenshots against baselines. Those are executable checks, not accessibility certification or design judgment. [Visual QA](https://github.com/AntreasAntoniou/visual-qa) is the complementary screenshot-review protocol for hierarchy, readability, affordances, and visible edge states; it does not replace these functional tests. No automatic integration is assumed.
+
+Plans execute real actions. Review targets, credentials, fixtures, and side effects before running them; [risk labels are coordination controls, not a sandbox](SECURITY.md).
 
 ---
 
@@ -68,11 +81,14 @@ heimdall doctor
 heimdall init                       # writes ./heimdall.plan.json
 heimdall init -o smoke.plan.json    # custom path
 
-# 2. Edit baseUrl + cases, then run it
+# 2. Edit baseUrl + cases for an app you are authorized to test
+heimdall validate heimdall.plan.json  # checks the plan without executing it
+
+# 3. Run and read the report
 heimdall run heimdall.plan.json
 ```
 
-A run prints a human-readable report to stderr and writes full evidence to disk:
+A run prints a human-readable report to stderr and writes the collected evidence to disk. Example output:
 
 ```
 Heimdall — example-plan  (1843ms, v0.1.0)
@@ -84,15 +100,17 @@ PASS  health-endpoint cdp [medium]
 report: heimdall-runs/latest/report.json
 ```
 
-Everything lands under the output dir (default `heimdall-runs/latest`):
+Run reports and captured evidence land under the output dir (default `heimdall-runs/latest`). A typical CDP case produces:
 
 ```
 heimdall-runs/latest/
   report.json                       # the full machine-readable RunReport
   cases/<case-id>/
-    final.png                       # final-state screenshot (always captured)
-    network.har                     # per-case HAR (cdp lane; headers omitted)
+    final.png                       # final-state screenshot, when capture succeeds
+    network.har                     # per-case HAR; response bodies omitted, may contain secrets
 ```
+
+The JSON report also contains console errors, captured responses, and per-oracle results when available. Optional HTML/JUnit reports support review and CI; traces, videos, and visual diffs provide additional evidence when requested or applicable. Evidence can be missing after a driver/capture error. Use a distinct `--out` directory when you need to preserve earlier runs, and treat output directories as sensitive.
 
 The process **exits non-zero if any case failed or errored** — and also if cases existed but *nothing actually ran* (everything blocked/skipped, or a `--filter` that matched no cases), so a CI gate can never pass green on a non-run. Blocked/skipped alongside at least one pass do not fail the run.
 
@@ -214,7 +232,7 @@ The pass/fail layer. A case passes only if **every** oracle passes.
 | `noConsoleErrors` | — | No `console.error` / page errors during the case |
 | `evalTruthy` | `expression` | JS evaluated in the page is truthy |
 | `a11y` | `maxImpact?` (`minor` \| `moderate` \| `serious` \| `critical`, default `serious`), `include?`/`exclude?` (CSS selectors) | Runs an axe-core accessibility audit over the page and fails on any violation **at or above** `maxImpact`; the violation list is captured as evidence. Self-drivable on `cdp`/`container`. |
-| `screenshotMatches` | `baseline` (path to a baseline PNG), `maxDiffRatio?` (0..1, default `0.01`), `selector?` (clip to an element instead of full page) | Pixel-compares a screenshot of the page (or `selector`) against a committed golden via pixelmatch and fails when the fraction of differing pixels exceeds `maxDiffRatio`; the diff image is written as evidence. |
+| `screenshotMatches` | `baseline` (path to a baseline PNG), `maxDiffRatio?` (0..1, default `0.01`), `selector?` (clip to an element instead of the viewport) | Pixel-compares the viewport (or `selector`) against a baseline via pixelmatch and fails when the fraction of differing pixels exceeds `maxDiffRatio`; the driver attempts to write a diff image as evidence. A missing baseline passes with a first-run note and is seeded from the current capture; this is not regression evidence until the baseline is reviewed. |
 
 ### A concrete plan
 
@@ -304,7 +322,7 @@ Run a plan through its drivers (`cdp`/`container`) and report.
 | `--diff <prevReport.json>` | — | Compare against a previous run's `report.json` and print a regression diff (newly-failing / newly-passing / still-failing / added / removed) after the run |
 | `-C, --config <file>` | `heimdall.config.json` | Load run defaults + an `env` seed from a config file before parsing the plan (see [Config & secrets](#config--secrets)) |
 | `-f, --filter <idOrTag>` | — | Only run cases matching an id substring or exact tag (repeatable) |
-| `--merge-results <file>` | — | Fold an externally-produced `Result[]` (or a `{ results: [...] }` report) into the run — e.g. `extension` cases the agent drove in real Chrome. A result whose `id` matches a (typically `blocked`) case replaces it **verbatim**; unknown ids are appended. The merge never fabricates a passing verdict — see [`heimdall extensions`](#heimdall-extensions-plan) for the two-lane workflow |
+| `--merge-results <file>` | — | Fold an externally-produced `Result[]` (or a `{ results: [...] }` report) into the run. Matching `blocked`/`skipped` entries are replaced; actual executed verdicts are not overwritten; unknown ids are appended. External evidence remains the producer's responsibility—see [`heimdall extensions`](#heimdall-extensions-plan). |
 | `--json` | `false` | Print the full JSON report to stdout |
 | `-v, --verbose` | `false` | Verbose debug logging |
 
@@ -327,6 +345,10 @@ A captured trace is replayable with `npx playwright show-trace <out>/cases/<id>/
 ### `heimdall doctor`
 
 Check the toolchain: Node, Playwright Chromium, Docker, and the container image. Exits non-zero only if the `cdp` lane isn't ready.
+
+### `heimdall validate <plan>`
+
+Check JSON and plan-schema validity without executing actions. Reports validation errors with their case and field paths; exits `0` for a valid plan or `2` for invalid/unreadable input. This checks structure, not whether the assertions are meaningful or the target is safe.
 
 ### `heimdall gc`
 
@@ -360,7 +382,7 @@ Emit a manifest of the plan's `driver: extension` cases for an agent to drive in
 | --- | --- | --- |
 | `-o, --out <file>` | stdout | Write the manifest to a file instead of stdout |
 
-The two-lane workflow closes with `--merge-results`: run the self-drivable lanes, drive the extension cases via the agent's real-Chrome tools, write their outcomes as a `Result[]`, then fold them back into a single, honest, whole-plan report:
+The two-lane workflow closes with `--merge-results`: run the self-drivable lanes, drive the extension cases via the agent's real-Chrome tools, write their outcomes as a `Result[]`, then fold them into one report. Importing a result does not independently verify that its claimed actions happened; review its producer and evidence:
 
 ```bash
 heimdall extensions plan.json -o ext-manifest.json   # what the agent must drive
@@ -378,7 +400,7 @@ Build the Docker image used by the `container` driver (`heimdall:local`). It als
 
 ### `heimdall auth save`
 
-Open a browser, log in manually, and save the session to a file. Your password/MFA never touch Heimdall.
+Open a Playwright browser, log in manually, and save its session to a file. The CLI does not ask for your password or MFA code; the saved cookies/localStorage can still grant account access.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -408,7 +430,9 @@ The agent builds a plan, calls `run`, and reads the structured report back — n
 
 ## Risk gating
 
-Every case carries a `risk`. Cases marked `destructive`, `paid`, or `prod` are **blocked unless you pass `--allow-risk`** (and a human has confirmed it). `read-only` and `writes` run freely. Blocked cases appear in the report as `blocked` with the reason — they are never silently skipped or passed.
+Every case carries a `risk`. Cases marked `destructive`, `paid`, or `prod` are **blocked unless you pass `--allow-risk`**. Obtain human authorization before using that flag: it permits all such selected cases, and the runtime cannot verify the authorization itself. `read-only` and `writes` are not gated. The labels are author-supplied; Heimdall does not infer the real consequences of a request. Blocked cases appear with their reason.
+
+Plan-level setup/teardown is trusted and ungated, and runs through a host Playwright browser even when the cases use containers. A container isolates the case's browser process, not the system under test, network side effects, or plan-level hooks. Use disposable test data and review cleanup/recovery independently; best-effort teardown failures do not flip a passing verdict.
 
 `extension` cases are always blocked too: Heimdall cannot self-drive your real Chrome, so it records them as `blocked` with a pointer to run them through an agent's browser tools.
 
@@ -452,7 +476,7 @@ An optional `heimdall.config.json` (loaded from the cwd, or an explicit `--confi
 - **`env` never clobbers a real environment variable** — an entry is applied only when the key is unset, so a CI-provided `API_TOKEN` always wins over the config file. Put non-secret defaults here; keep actual secrets in the real environment.
 - In a plan, `${env.API_TOKEN}` resolves from `process.env` at runtime (unknown env ⇒ empty string), so tokens live in the environment, never in the committed plan JSON. The `container` driver forwards the env vars a case references into the sandbox via `docker run -e NAME` (the value is pulled from the host environment at run time — the on-disk sub-plan keeps the `${env.NAME}` token, never the resolved secret), so `${env.*}` resolves identically on the `cdp` and `container` lanes.
 
-**Secret hygiene — what is and isn't scrubbed.** Env-resolved secret values are redacted from everything Heimdall serializes: `report.json` (including a `${env.TOKEN}` spliced into a request URL, and any error message that embeds it) and the terminal/HTML/JUnit reports. They are **not** scrubbed from the binary Playwright **evidence files** — the per-case `network.har` (which retains request headers and URLs even though response bodies are omitted) and `trace.zip` can contain the secret on the wire, exactly as an injected `storageState` holds live cookies. **Treat a run's output directory as secret-bearing** — keep it gitignored and don't share it.
+**Secret hygiene — what is and isn't scrubbed.** The runtime tracks env-resolved values of at least four characters and replaces registered values in `report.json` and reports derived from it. This is literal-value redaction, not general secret detection. Short, transformed, unregistered, or externally supplied secrets need separate scrutiny. Without extra redaction configuration, the per-case `network.har` retains headers and URLs even though response bodies are omitted; traces, screenshots, and video can also expose sensitive data. **Treat a run's output directory as secret-bearing**—keep it gitignored and review it before any sharing.
 
 **Extra redaction config.** Beyond the per-run `${env.X}` secrets, a plan can declare a `redaction` block to scrub SUT-returned PII or sensitive headers from the report:
 
@@ -467,7 +491,7 @@ An optional `heimdall.config.json` (loaded from the cwd, or an explicit `--confi
 }
 ```
 
-The spec is folded with the env secrets and applied to the serialized report (`report.json` + terminal/HTML/JUnit) **and the on-disk `network.har`** (scrubbed in the driver via `scrubHar` — both the `cdp` lane and the `container` lane, which threads the spec into its inner run). The binary `trace.zip`/video are **not** scrubbed — treat the run's output dir as sensitive. Embedders can supply the same spec out-of-band via `runPlan(plan, { redaction })`, which is merged with `plan.redaction`. A malformed regex pattern is ignored (fail-safe) rather than aborting the run.
+The spec is folded with the registered env values and applied to the serialized report (`report.json` + terminal/HTML/JUnit). A non-empty spec also enables best-effort scrubbing of the on-disk `network.har` in the CDP driver; the container driver passes the spec to its inner run. HAR scrubbing failures do not fail the case, and screenshots, `trace.zip`, and video are not scrubbed. Embedders can supply the same spec via `runPlan(plan, { redaction })`, merged with `plan.redaction`. Invalid regex patterns are silently ignored, so verify your patterns and inspect outputs rather than treating configuration as proof that redaction succeeded.
 
 A malformed config (bad JSON or an unknown key) fails loudly; a missing config is simply ignored.
 
@@ -498,7 +522,7 @@ An agent workflow can author a thorough plan and then execute it through the mos
 
 **Per-oracle results — auditable greens.** Each `Result` carries an optional `oracleResults[]` — one entry per oracle with its `kind` (the `assert` discriminant), `passed`, and a human-readable `detail`. A passing case no longer reports only `observed: "all N oracle(s) satisfied"`; the verifier can see *which* oracle fired and on what, detecting a hollow green from the report alone without a re-run. (Older reports omit the field, so it is optional.)
 
-**Merging the two lanes into one report.** Embedders close the loop programmatically: the skill collects the externally-driven `extension` outcomes as a `Result[]` and passes them to `runPlan(plan, { externalResults })` (the CLI equivalent is `--merge-results`). The runner replaces each matching (blocked) id verbatim and appends any extra ids, then sorts back into plan order — so a live test ends with a single `RunReport`, and `exitCodeFor` gates on the merged truth:
+**Merging the two lanes into one report.** Embedders pass externally driven outcomes to `runPlan(plan, { externalResults })` (the CLI equivalent is `--merge-results`). The runner replaces matching `blocked`/`skipped` placeholders, refuses to overwrite an executed verdict, and appends extra IDs before recomputing the summary. `exitCodeFor` then reflects that merged report, whose imported evidence still depends on the external producer:
 
 ```ts
 const report = await runPlan(plan, {
@@ -508,7 +532,19 @@ const report = await runPlan(plan, {
 });
 ```
 
-The result: one plan format, one evidence model, with each case routed to the driver that can run it most faithfully — and a report that never lies about what was actually exercised.
+The result is one plan format and one evidence model, with execution and handoffs kept visible. It makes a verification claim inspectable; it does not remove the need to assess the tests or trustworthiness of their evidence.
+
+## Development
+
+From a source checkout:
+
+```bash
+npm ci
+npm test
+npm run build
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Browser/container integration tests need the corresponding runtime dependencies; passing schema or unit tests alone does not verify those lanes.
 
 ---
 
